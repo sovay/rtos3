@@ -9,12 +9,6 @@
 #include <avr/io.h>
 #include "os.h"
 
-/** PPP and PT defined in user application. */
-extern const unsigned char PPP[];
-
-/** PPP and PT defined in user application. */
-extern const unsigned int PT;
-
 /**
  * @brief Contains all information of a given task.
  */
@@ -26,8 +20,14 @@ typedef struct Task_Struct
 	uint8_t volatile * stackPointer = NULL;
 	uint8_t level;
 	//periodic only
-	uint8_t name;
-	uint8_t wcet; //worst case execution time
+	//TODO maybe just use unsigned int? (params to task create periodic)
+	uint16_t wcet; //worst case execution time
+	uint16_t period;
+	uint16_t offset;
+	uint16_t ticksUntilReady;
+	//intrusive linked list
+	Task_t * next;
+	Task_t * prev;
 } Task_t;
 
 /**
@@ -35,15 +35,88 @@ typedef struct Task_Struct
  */
 typedef struct {
 	/** The first item in the queue. NULL if the queue is empty. */
-	task_descriptor_t* head;
+	Task_t * head;
 	/** The last item in the queue. Undefined if the queue is empty. */
-	task_descriptor_t* tail;
+	Task_t * tail;
 } queue_t;
+
+void queueInit(queue_t * q)
+{
+		q->head = q->tail = NULL;
+}
+
+void queuePush(queue_t * q, Task_t * task)
+{
+	if(q->head == NULL) {
+		q->head = q->tail = task;
+	} else {
+		q->tail->next = task;
+		task->prev = q->tail;
+		q->tail = task;
+	}
+}
+
+void queueAddFront(queue_t * q, Task_t * task)
+{
+	if(q->head == SNULL) {
+		q->head = q->tail = task;
+    } else {
+		q->head->prev = task;
+		task->next = q->head;
+		q->head = task;
+	}
+}
+
+Task_t * queuePop(queue_t * q)
+{
+	if (q->head == NULL){OS_Abort();}
+	Task_t * temp = q->head;
+	if (q->head == q->tail)
+	{
+		q->head->next = q->head->prev = NULL;
+		q->head = q->tail = NULL;
+	} 
+	else
+	{
+		q->head->next->prev = NULL;
+		q->head = q->head->next;
+		temp->prev = temp->next = NULL;
+	}
+	return temp;
+}
+
+void queueAddSortedByTicksUntilReady(queue_t * q, Task_t * task)
+{
+	if (q->head = NULL)
+	{
+		q->head = q->tail = task;
+		return;
+	} else if (q->head == q->tail)
+	{
+		if(q->head->ticksUntilReady > task->ticksUntilReady) {
+			queueAddFront(q,task);
+		} else {
+			queuePush(q,task)
+		}
+	}
+	for (Task_t * ptr = q->tail; ptr != q->head; ptr = ptr->prev)
+	{
+		if (ptr->prev->ticksUntilReady > task->ticksUntilReady)
+		{
+			task->prev = ptr->prev->prev;
+			task->next = ptr->prev
+			ptr->prev->prev = task;
+			ptr->prev->next = ptr;		
+		}
+	}
+}
 
 //Kernal Globals
 static Task_t  Tasks[MAXPROCESS];
 static uint8_t NUM_TASKS_IN_USE = 0; 
 static Task_t* currentTask = NULL;
+static queue_t readyQueue[3];
+static queue_t sleepQueue[3];
 
 void  OS_Abort(void)
 {
@@ -57,6 +130,7 @@ int Task_Create_Common(void (*f)(void), int arg, uint8_t level)
 	Tasks[NUM_TASKS_IN_USE].argument = arg;
 	Tasks[NUM_TASKS_IN_USE].level    = level;
 	Tasks[NUM_TASKS_IN_USE].stackPointer = &Tasks[NUM_TASKS_IN_USE].stack;
+	Tasks[NUM_TASKS_IN_USE].wcet = 0;
 }
 
 int   Task_Create_System(void (*f)(void), int arg)
@@ -81,16 +155,25 @@ int   Task_Create_Period(void (*f)(void), int arg, unsigned int period, unsigned
 {
 	if (NUM_TASKS_IN_USE >= MAXPROCESS) return -1; //error to many procs
 	Task_Create_Common(f, arg, PERIODIC);
-	Tasks[NUM_TASKS_IN_USE].name = name;
 	Tasks[NUM_TASKS_IN_USE].wcet = wcet;
 	//TODO do scheduling or w/e else
 	NUM_TASKS_IN_USE++;
 	return 0;
 }
 
-void  Task_Terminate(void);    
+//TODO this only works on back of array
+//TODO factor out NUM_TASKS_IN_USE at least as an array index
+void  Task_Terminate(void) 
+{
+}
+
 void  Task_Next(void);
-int   Task_GetArg(void);          
+
+int   Task_GetArg(void)          
+{
+	return Tasks[currentTask].argument;
+}
+
 EVENT *Event_Init(void);
 void  Event_Clear( EVENT *e );  
 void  Event_Wait( EVENT *e );  
