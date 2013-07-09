@@ -3,15 +3,110 @@
  *
  * Created: 05/07/2013 10:38:25 AM
  *  Author: Rob & Nick
+ *  Based off of Scott Craig and Justin Tanner's OS, provided and edited by Neil MacMillan
  */ 
 
 
 #include <avr/io.h>
+#include <avr/interrupt.h>
+
 #include "os.h"
 
+
+#define    SAVE_CTX_TOP()       asm volatile (\
+    "push   r31             \n\t"\
+    "in     r31,__SREG__    \n\t"\
+    "cli                    \n\t"::); /* Disable interrupt */
+
+#define STACK_SREG_SET_I_BIT()    asm volatile (\
+    "ori    r31, 0x80        \n\t"::);
+
+#define    SAVE_CTX_BOTTOM()       asm volatile (\
+    "push   r31             \n\t"\
+    "push   r30             \n\t"\
+    "push   r29             \n\t"\
+    "push   r28             \n\t"\
+    "push   r27             \n\t"\
+    "push   r26             \n\t"\
+    "push   r25             \n\t"\
+    "push   r24             \n\t"\
+    "push   r23             \n\t"\
+    "push   r22             \n\t"\
+    "push   r21             \n\t"\
+    "push   r20             \n\t"\
+    "push   r19             \n\t"\
+    "push   r18             \n\t"\
+    "push   r17             \n\t"\
+    "push   r16             \n\t"\
+    "push   r15             \n\t"\
+    "push   r14             \n\t"\
+    "push   r13             \n\t"\
+    "push   r12             \n\t"\
+    "push   r11             \n\t"\
+    "push   r10             \n\t"\
+    "push   r9              \n\t"\
+    "push   r8              \n\t"\
+    "push   r7              \n\t"\
+    "push   r6              \n\t"\
+    "push   r5              \n\t"\
+    "push   r4              \n\t"\
+    "push   r3              \n\t"\
+    "push   r2              \n\t"\
+    "push   r1              \n\t"\
+    "push   r0              \n\t"::);
+
+/**
+ * @brief Push all the registers and SREG onto the stack.
+ */
+#define    SAVE_CTX()    SAVE_CTX_TOP();SAVE_CTX_BOTTOM();
+
+/**
+ * @brief Pop all registers and the status register.
+ */
+#define    RESTORE_CTX()    asm volatile (\
+    "pop    r0                \n\t"\
+    "pop    r1                \n\t"\
+    "pop    r2                \n\t"\
+    "pop    r3                \n\t"\
+    "pop    r4                \n\t"\
+    "pop    r5                \n\t"\
+    "pop    r6                \n\t"\
+    "pop    r7                \n\t"\
+    "pop    r8                \n\t"\
+    "pop    r9                \n\t"\
+    "pop    r10             \n\t"\
+    "pop    r11             \n\t"\
+    "pop    r12             \n\t"\
+    "pop    r13             \n\t"\
+    "pop    r14             \n\t"\
+    "pop    r15             \n\t"\
+    "pop    r16             \n\t"\
+    "pop    r17             \n\t"\
+    "pop    r18             \n\t"\
+    "pop    r19             \n\t"\
+    "pop    r20             \n\t"\
+    "pop    r21             \n\t"\
+    "pop    r22             \n\t"\
+    "pop    r23             \n\t"\
+    "pop    r24             \n\t"\
+    "pop    r25             \n\t"\
+    "pop    r26             \n\t"\
+    "pop    r27             \n\t"\
+    "pop    r28             \n\t"\
+    "pop    r29             \n\t"\
+    "pop    r30             \n\t"\
+    "pop    r31             \n\t"\
+	"out    __SREG__, r31    \n\t"\
+    "pop    r31             \n\t"::);
 /**
  * @brief Contains all information of a given task.
  */
+
+typedef struct  Event_Struct {
+	//important stuff for events
+} EVENT;
+
+
 typedef struct Task_Struct 
 {
 	void (* function)(void) = NULL;
@@ -118,11 +213,55 @@ static Task_t* currentTask = NULL;
 static queue_t readyQueue[3];
 static queue_t sleepQueue[3];
 
-void  OS_Abort(void)
-{
-	for(;;) { 
+void OS_Abort(void) {
+	uint8_t i, j;
+	uint8_t flashes, mask;
+
+	cli();
+
+	/* Initialize port for output */
+	LED_DDR = LED_RED_MASK | LED_GREEN_MASK;
+
+	if (error_msg < ERR_RUN_1_USER_CALLED_OS_ABORT) {
+		flashes = error_msg + 1;
+		mask = LED_GREEN_MASK;
+	} else {
+		flashes = error_msg + 1 - ERR_RUN_1_USER_CALLED_OS_ABORT;
+		mask = LED_RED_MASK;
 	}
-}  
+
+	for (;;) {
+		LED_PORT = (uint8_t) (LED_RED_MASK| LED_GREEN_MASK);
+
+		for (i = 0; i < 100; ++i) {
+			_delay_ms(25);
+		}
+
+		LED_PORT = (uint8_t) 0;
+
+		for (i = 0; i < 40; ++i) {
+			_delay_ms(25);
+		}
+
+		for (j = 0; j < flashes; ++j) {
+			LED_PORT = mask;
+
+			for (i = 0; i < 10; ++i) {
+				_delay_ms(25);
+			}
+
+			LED_PORT = (uint8_t) 0;
+
+			for (i = 0; i < 10; ++i) {
+				_delay_ms(25);
+			}
+		}
+
+		for (i = 0; i < 20; ++i) {
+			_delay_ms(25);
+		}
+	}
+}
 
 int Task_Create_Common(void (*f)(void), int arg, uint8_t level)
 {
@@ -174,12 +313,39 @@ int   Task_GetArg(void)
 	return Tasks[currentTask].argument;
 }
 
-EVENT *Event_Init(void);
-void  Event_Clear( EVENT *e );  
-void  Event_Wait( EVENT *e );  
-void  Event_Wait_Next( EVENT *e );  
-void  Event_Signal( EVENT *e );
-void  Event_Async_Signal( EVENT *e );
+EVENT *Event_Init(void) {
+	EVENT* event_ptr;
+	uint8_t sreg;
+
+	sreg = SREG;
+	cli();
+
+	if (num_events_created < MAXEVENT) {
+		//do stuff to creat an event
+	} else {
+		OS_Abort();
+	}
+
+}
+void  Event_Clear( EVENT *e ) {
+	//scan the list for cur_event=e and delete if true
+}  
+void  Event_Wait( EVENT *e ) {
+	//check flag
+	//if set, clear and resume
+	//if not, wait until set
+}
+void  Event_Wait_Next( EVENT *e ) {
+	//clear flag
+	//wait until set
+}
+void  Event_Signal( EVENT *e ) {
+	//alerts that e has occured, resuming tasks waiting on this event
+}
+void  Event_Async_Signal( EVENT *e ) {
+	//basically the same as event_signal, but for a bonus and uses ISR
+}
+
 unsigned int Now();  
 
 
