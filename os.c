@@ -362,7 +362,7 @@ void  Event_Signal( EVENT *e ) {
 
 /* we do nothing with this yes, requires ISR, will do later */
 void  Event_Async_Signal( EVENT *e ) {
-	//basically the same as event_signal, but for a bonus and uses ISR
+	//basically the same as eventstatic EVENT event_list[MAXEVENT];_signal, but for a bonus and uses ISR
 }
 
 unsigned int Now();  
