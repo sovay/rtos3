@@ -102,10 +102,13 @@
  * @brief Contains all information of a given task.
  */
 
-typedef struct  Event_Struct {
-	//important stuff for events
-} EVENT;
+static uint8_t num_events_created = 0;
+static EVENT event_list[MAXEVENT];
 
+typedef struct  Event_Struct {
+	unsigned flag:1;
+	Task_t waiting_task;
+} EVENT;
 
 typedef struct Task_Struct 
 {
@@ -314,34 +317,50 @@ int   Task_GetArg(void)
 }
 
 EVENT *Event_Init(void) {
-	EVENT* event_ptr;
+	EVENT* event_ptr = NULL;
 	uint8_t sreg;
 
 	sreg = SREG;
 	cli();
 
 	if (num_events_created < MAXEVENT) {
-		//do stuff to creat an event
+		event_ptr = (EVENT *) (uint16_t) (num_events_created+1);
 	} else {
 		OS_Abort();
 	}
+	return event_ptr;
 
 }
 void  Event_Clear( EVENT *e ) {
-	//scan the list for cur_event=e and delete if true
+	e->flag = 0;
 }  
+
+/* checks flag, if 1, resumes, if 0, waits for next event */
 void  Event_Wait( EVENT *e ) {
-	//check flag
-	//if set, clear and resume
-	//if not, wait until set
+	if (e->flag == 1){
+		e->flag==0;
+		Event_Signal(e);
+	} else {
+		e->waiting_task = currentTask;
+	}
 }
+
+/* clears flag, waits for next event */
 void  Event_Wait_Next( EVENT *e ) {
-	//clear flag
-	//wait until set
+	e->flag == 0;
+	e->waiting_task = currentTask;
 }
+
+/* signals waiting task, or, if there are none, sets the flag */
 void  Event_Signal( EVENT *e ) {
-	//alerts that e has occured, resuming tasks waiting on this event
+	if (e->waiting_task!=NULL) {
+		// resume(we->waiting_task);
+	}
+	else e->flag = 1;
+
 }
+
+/* we do nothing with this yes, requires ISR, will do later */
 void  Event_Async_Signal( EVENT *e ) {
 	//basically the same as event_signal, but for a bonus and uses ISR
 }
