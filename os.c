@@ -116,6 +116,9 @@
 
 static uint8_t num_events_created = 0;
 static EVENT event_list[MAXEVENT];
+static unsigned int cur_ticks = 0;
+static unsigned int inittime = 0;
+static unsigned int endtime = 0;
 
 typedef struct  Event_Struct {
 	unsigned flag:1;
@@ -496,7 +499,10 @@ void  Event_Async_Signal( EVENT *e ) {
 
 /* end event section */
 
-unsigned int Now();  
+unsigned int Now() {
+	return cur_ticks*5;
+	TCNT2;
+}
 
 
 
@@ -512,7 +518,13 @@ static void idle(void)
 static void kernelMainLoop(void) 
 {
 	for (;;) {
+		
 	}
+}
+
+static void kernel_update_ticker(void) {
+	/* update the tick count each time we enter this function (timed interrupt fires once/tick) */
+	cur_ticks++;
 }
 
 int OS_Init(void)
@@ -573,7 +585,7 @@ void TIMER2_COMPA_vect(void) __attribute__ ((signal, naked));
 	 * Inform the kernel that this task was interrupted.
 	 */
 	//kernel_request = TIMER_EXPIRED;
-
+	 cur_ticks++;
 	/*
 	 * Prepare for next tick interrupt.
 	 */
