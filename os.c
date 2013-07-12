@@ -536,15 +536,12 @@ void taskToReady(EVENT* e) {
 clears flag, waits for next event 
 */
 void  Event_Wait_Next( EVENT *e ) {
-<<<<<<< HEAD
 	e->flag = 0;
 	e->waiting_task = currentTask;
-=======
 	event_list[e]->flag == 0;
 	if (event_list[e]->waiting_task != NULL) OS_Abort;
 	queuePop(readyQueue[currentTask->level]);
 	event_list[e]->waiting_task = currentTask;
->>>>>>> db3938fdcedc84586d082c34387435b2fb02d10b
 }
 
 /* 
@@ -568,7 +565,7 @@ void  Event_Async_Signal( EVENT *e ) {
 
 unsigned int Now() {
 	return cur_ticks*5;
-	TCNT2;
+	//TCNT2;
 }
 
 
