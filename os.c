@@ -123,6 +123,9 @@
 
 static uint8_t num_events_created = 0;
 static EVENT event_list[MAXEVENT];
+static unsigned int cur_ticks = 0;
+static unsigned int inittime = 0;
+static unsigned int endtime = 0;
 
 typedef struct  Event_Struct {
 	unsigned flag:1;
@@ -446,8 +449,14 @@ int   Task_GetArg(void)
 	SREG = sreg;
 
 	return arg;
-}
+} 
 
+/* begin event section */
+
+/* 
+generate an EVENT pointer 
+(which is really just an array index number) 
+*/
 EVENT *Event_Init(void) {
 	EVENT* event_ptr = NULL;
 	uint8_t sreg;
@@ -466,41 +475,101 @@ EVENT *Event_Init(void) {
 	return event_ptr;
 
 }
+
+/* 
+clears occurances of event e 
+*/
 void  Event_Clear( EVENT *e ) {
-	e->flag = 0;
+	event_list[e]->flag = 0;
 }  
 
-/* checks flag, if 1, resumes, if 0, waits for next event */
+/* 
+checks flag, 
+if 1, resumes, 
+if 0, waits for next event
+POTENTIAL BUG: code isn't cli'd 
+*/
 void  Event_Wait( EVENT *e ) {
+<<<<<<< HEAD
 	if (e->flag == 1){
 		e->flag=0;
+=======
+	if (currentTask->level == PERIODIC) OS_Abort;
+	/*abort if a periodic task tries to wait*/
+	if (event_list[e]->flag == 1){ 
+	/* check if an event is already waiting */
+		
+		event_list[e]->flag==0; 
+		/* if so, consume flag, set task to sleepqueue, pop it off sleep queue */
+		
+		queuePop(readyQueue[currentTask->level]); 
+		/* POTENTIAL BUG: make sure that we do indeed always need to send the task to the sleep queue*/
+		
+		event_list[e]->waiting_task = currentTask;
+>>>>>>> db3938fdcedc84586d082c34387435b2fb02d10b
 		Event_Signal(e);
-	} else {
-		e->waiting_task = currentTask;
+
+	} else { /* if no events have arrived */
+		if (event_list[e]->waiting_task != NULL) OS_Abort;
+		/* only one task can wait per event */
+		queuePop(readyQueue[currentTask->level]);
+		event_list[e]->waiting_task = currentTask;
 	}
 }
 
-/* clears flag, waits for next event */
+/*
+readies a waiting task
+gets signalled by an event, takes the task off the event list
+adds it to the front of the active queue
+POTENTIAL BUG: make sure if this task is added to the front
+and the current task becomes #2, it still works properly
+and make sure this added task doesnt preempt a current task if 
+they have the same priority
+*/
+void taskToReady(EVENT* e) {
+	if (event_list[e]->waiting_task==NULL) OS_Abort;
+	queueAddFront(event_list[e]->waiting_task);
+	event_list[e]->waiting_task = NULL;
+}
+
+/* 
+clears flag, waits for next event 
+*/
 void  Event_Wait_Next( EVENT *e ) {
+<<<<<<< HEAD
 	e->flag = 0;
 	e->waiting_task = currentTask;
+=======
+	event_list[e]->flag == 0;
+	if (event_list[e]->waiting_task != NULL) OS_Abort;
+	queuePop(readyQueue[currentTask->level]);
+	event_list[e]->waiting_task = currentTask;
+>>>>>>> db3938fdcedc84586d082c34387435b2fb02d10b
 }
 
-/* signals waiting task, or, if there are none, sets the flag */
+/* 
+signals waiting task, or, if there are none, sets the flag
+ */
 void  Event_Signal( EVENT *e ) {
-	if (e->waiting_task!=NULL) {
-		// resume(we->waiting_task);
+	if (event_list[e]->waiting_task!=NULL) {
+		taskToReady(e);
 	}
-	else e->flag = 1;
+	else event_list[e]->flag = 1;
 
 }
 
 /* we do nothing with this yes, requires ISR, will do later */
 void  Event_Async_Signal( EVENT *e ) {
-	//basically the same as event_signal, but for a bonus and uses ISR
+	//basically the same as eventstatic EVENT event_list[MAXEVENT];_signal, but for a bonus and uses ISR
 }
 
-unsigned int Now();  
+
+/* end event section */
+
+unsigned int Now() {
+	return cur_ticks*5;
+	TCNT2;
+}
 
 
 
@@ -550,7 +619,13 @@ static void kernelUpdate(void)
 static void kernelMainLoop(void) 
 {
 	for (;;) {
+		
 	}
+}
+
+static void kernel_update_ticker(void) {
+	/* update the tick count each time we enter this function (timed interrupt fires once/tick) */
+	cur_ticks++;
 }
 
 int OS_Init(void)
@@ -656,7 +731,7 @@ void TIMER2_COMPA_vect(void) __attribute__ ((signal, naked));
 	 * Inform the kernel that this task was interrupted.
 	 */
 	//kernel_request = TIMER_EXPIRED;
-
+	 cur_ticks++;
 	/*
 	 * Prepare for next tick interrupt.
 	 */
