@@ -12,9 +12,16 @@
 
 #include "os.h"
 
+/** The number of clock cycles in one "tick" or 5 ms */
+#define TICK_CYCLES     (F_CPU / 1000 * TICK)
+
 /*
  * Context switching
  */
+/**
+ * @brief Push all the registers and SREG onto the stack.
+ */
+#define    SAVE_CTX()    SAVE_CTX_TOP();SAVE_CTX_BOTTOM();
 /**
  * It is important to keep the order of context saving and restoring exactly
  * in reverse. Also, when a new task is created, it is important to
@@ -76,16 +83,16 @@
  * @brief Pop all registers and the status register.
  */
 #define    RESTORE_CTX()    asm volatile (\
-    "pop    r0                \n\t"\
-    "pop    r1                \n\t"\
-    "pop    r2                \n\t"\
-    "pop    r3                \n\t"\
-    "pop    r4                \n\t"\
-    "pop    r5                \n\t"\
-    "pop    r6                \n\t"\
-    "pop    r7                \n\t"\
-    "pop    r8                \n\t"\
-    "pop    r9                \n\t"\
+    "pop    r0              \n\t"\
+    "pop    r1              \n\t"\
+    "pop    r2              \n\t"\
+    "pop    r3              \n\t"\
+    "pop    r4              \n\t"\
+    "pop    r5              \n\t"\
+    "pop    r6              \n\t"\
+    "pop    r7              \n\t"\
+    "pop    r8              \n\t"\
+    "pop    r9              \n\t"\
     "pop    r10             \n\t"\
     "pop    r11             \n\t"\
     "pop    r12             \n\t"\
@@ -122,6 +129,13 @@ typedef struct  Event_Struct {
 	Task_t waiting_task;
 } EVENT;
 
+/**
+ * @brief This is the set of states that a task can be in at any given time.
+ */
+typedef enum {
+	DEAD = 0, RUNNING, READY, WAITING, SLEEPING
+} taskState_t;
+
 typedef struct Task_Struct 
 {
 	void (* function)(void) = NULL;
@@ -129,6 +143,7 @@ typedef struct Task_Struct
 	uint8_t stack[MAXSTACK];
 	uint8_t volatile * stackPointer = NULL;
 	uint8_t level;
+	taskState_t state;
 	//periodic only
 	//TODO maybe just use unsigned int? (params to task create periodic)
 	uint16_t wcet; //worst case execution time
@@ -139,6 +154,25 @@ typedef struct Task_Struct
 	Task_t * next;
 	Task_t * prev;
 } Task_t;
+
+/**
+ * @brief This is the set of kernel requests, i.e., a request code for each system call.
+ */
+typedef enum {
+	NONE = 0,
+	TIMER_EXPIRED,
+	TASK_CREATE,
+	TASK_TERMINATE,
+	TASK_NEXT,
+	TASK_GET_ARG,
+	TASK_SLEEP,
+	EVENT_INIT,
+	EVENT_WAIT,
+	EVENT_SIGNAL,
+	EVENT_BROADCAST,
+	EVENT_SIGNAL_AND_NEXT,
+	EVENT_BROADCAST_AND_NEXT
+} kernelRequest_t;
 
 /**
  * @brief Contains pointers to head and tail of a linked list.
@@ -225,13 +259,14 @@ void queueAddSortedByTicksUntilReady(taskQueue_t * q, Task_t * task)
 static volatile Task_t  Tasks[MAXPROCESS + 1]; //extra space for idle
 static volatile uint8_t NUM_TASKS_IN_USE = 0; 
 static volatile Task_t* currentTask = NULL;
+static volatile Task_t* const idleTask = &Tasks[MAXPROCESS];
 static volatile uint16_t kernelStackPointer;
+static volatile kernelRequest_t kernelRequest;
 //one for each RR, PERIODIC, and SYSTEM 
 //RR, PERIODIC and SYSTEM, are defined to 1-3 respectively
-//having 4 of these allows nice indexing like sleepQueue[RR], without needing -1 on every index
+//having 4 of these allows nice indexing like readyQueue[RR], without needing -1 on every index
 //TODO may not need queue for system
 static volatile taskQueue_t readyQueue[4]; 
-static volatile taskQueue_t sleepQueue[4];
 
 void OS_Abort(void) {
 	uint8_t i, j;
@@ -289,6 +324,7 @@ int Task_Create_Common(void (*f)(void), int arg, uint8_t level, Task_t * task)
 	task->argument = arg;
 	task->level    = level;
 	task->wcet     = 0;
+	task->state    = READY;
 	/* The stack grows down in memory, so the stack pointer is going to end up
 	 * pointing to the location 32 + 1 + 2 + 2 = 37 bytes above the bottom, to make
 	 * room for (from bottom to top):
@@ -327,7 +363,7 @@ int   Task_Create_System(void (*f)(void), int arg)
 	if (NUM_TASKS_IN_USE >= MAXPROCESS + 1) return -1; //error to many procs
 	Task_t * task = queuePop(&readyQueue[0]);
 	Task_Create_Common(f, arg, SYSTEM, task);
-	queuePush(&sleepQueue[SYSTEM], task);
+	queuePush(&readyQueue[SYSTEM], task);
 	NUM_TASKS_IN_USE++;
 	
 	SREG = sreg;
@@ -363,7 +399,7 @@ int   Task_Create_Period(void (*f)(void), int arg, unsigned int period, unsigned
 	Task_Create_Common(f, arg, PERIODIC, task);
 	Tasks[NUM_TASKS_IN_USE].wcet = wcet;
 	Tasks[NUM_TASKS_IN_USE].ticksUntilReady = start;
-	queueAddSortedByTicksUntilReady(&sleepQueue[PERIODIC], task); 
+	queueAddSortedByTicksUntilReady(&readyQueue[PERIODIC], task); 
 	NUM_TASKS_IN_USE++;
 	
 	SREG = sreg;
@@ -373,11 +409,29 @@ int   Task_Create_Period(void (*f)(void), int arg, unsigned int period, unsigned
 
 void  Task_Terminate(void) 
 {
+	uint8_t volatile sreg;
+	
+	sreg = SREG;
+	cli();
+	
 	//TODO probably need to context switch and reschedule
 	queuePush(&readyQueue[0], currentTask);
+	
+	SREG = sreg;
 }
 
-void  Task_Next(void);
+void  Task_Next(void)
+{
+	uint8_t volatile sreg;
+	
+	sreg = SREG;
+	cli();
+	
+	kernelRequest = TASK_NEXT;
+	enterKernel();
+	
+	SREG = sreg;
+}
 
 int   Task_GetArg(void)          
 {
@@ -406,6 +460,9 @@ EVENT *Event_Init(void) {
 	} else {
 		OS_Abort();
 	}
+	
+	SREG = sreg;
+	
 	return event_ptr;
 
 }
@@ -416,7 +473,7 @@ void  Event_Clear( EVENT *e ) {
 /* checks flag, if 1, resumes, if 0, waits for next event */
 void  Event_Wait( EVENT *e ) {
 	if (e->flag == 1){
-		e->flag==0;
+		e->flag=0;
 		Event_Signal(e);
 	} else {
 		e->waiting_task = currentTask;
@@ -425,7 +482,7 @@ void  Event_Wait( EVENT *e ) {
 
 /* clears flag, waits for next event */
 void  Event_Wait_Next( EVENT *e ) {
-	e->flag == 0;
+	e->flag = 0;
 	e->waiting_task = currentTask;
 }
 
@@ -456,6 +513,40 @@ static void idle(void)
 	};
 }
 
+static void kernelSchedule(void)
+{
+	if (currentTask->state != RUNNING && currentTask == idleTask)
+	{
+		if (readyQueue[SYSTEM].head != NULL)
+		{
+			currentTask = queuePop(&readyQueue[SYSTEM].head);
+		}
+		else if (readyQueue[PERIODIC].head != NULL && readyQueue[PERIODIC].head->ticksUntilReady == 0)
+		{
+			currentTask = queuePop(&readyQueue[PERIODIC].head);
+		}
+		else if (readyQueue[RR].head != NULL)
+		{
+			currentTask = queuePop(&readyQueue[RR].head);
+		}
+		else
+		{
+			currentTask = idleTask;
+		}
+		currentTask->state = RUNNING;
+	}
+}
+
+static void kernelUpdate(void)
+{
+	switch (kernelRequest) {
+	case TASK_NEXT:
+		queuePush(&readyQueue[currentTask->level]);
+		currentTask->state = READY;
+	break;
+	}
+}
+
 static void kernelMainLoop(void) 
 {
 	for (;;) {
@@ -465,13 +556,58 @@ static void kernelMainLoop(void)
 int OS_Init(void)
 {
 	int i;
+	//push all descriptors onto ready to use descriptor queue
 	for (int i = 0; i < MAXPROCESS; i++)
 	{
+		Tasks[i].state = DEAD;
 		queuePush(&readyQueue[0], &Tasks[i]);
 	}
-    //create idle tasks
+    //create idle task
+	Tasks[MAXPROCESS].state = READY;
 	Task_Create_Common(idle, NULL, NULL, &Tasks[MAXPROCESS]);
 	NUM_TASKS_IN_USE++;
+	
+	//setup timers
+	TCCR2B &= ~(_BV(CS12)| _BV(CS11));
+	TCCR2B |= (_BV(CS10));		// start the timer at fclk/1
+	
+	/* Set up Timer 2 Output Compare interrupt,the TICK clock. */
+	TIMSK2 |= _BV(OCIE2A);
+	
+	OCR2A = TCNT2 + TICK_CYCLES;
+	/* Clear flag. */
+	TIFR2 = _BV(OCF2A);
+}
+
+static void enterKernel(void) {
+	/*
+	 * The PC was pushed on the stack with the call to this function.
+	 * Now push on the I/O registers and the SREG as well.
+	 */
+	SAVE_CTX();
+
+	/*
+	 * The last piece of the context is the SP. Save it to a variable.
+	 */
+	cur_task->sp = (uint8_t*) SP;
+
+	/*
+	 * Now restore the kernel's context, SP first.
+	 */
+	SP = kernel_sp;
+
+	/*
+	 * Now restore I/O and SREG registers.
+	 */
+	RESTORE_CTX();
+
+	/*
+	 * return explicitly required as we are "naked".
+	 *
+	 * The last piece of the context, the PC, is popped off the stack
+	 * with the ret instruction.
+	 */
+	asm volatile ("ret\n"::);
 }
 
 /**
@@ -526,6 +662,8 @@ void TIMER2_COMPA_vect(void) __attribute__ ((signal, naked));
 	 */
 	OCR2A += TICK_CYCLES;
 
+	kernelRequest = TIMER_EXPIRED;
+
 	/*
 	 * Restore the kernel context. (The stack pointer is restored again.)
 	 */
@@ -539,7 +677,7 @@ void TIMER2_COMPA_vect(void) __attribute__ ((signal, naked));
 	/*
 	 * We use "ret" here, not "reti", because we do not want to
 	 * enable interrupts inside the kernel.
-	 * Explilictly required as we are "naked".
+	 * Explicitly required as we are "naked".
 	 *
 	 * The last piece of the context, the PC, is popped off the stack
 	 * with the ret instruction.
