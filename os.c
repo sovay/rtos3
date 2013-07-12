@@ -490,10 +490,8 @@ if 0, waits for next event
 POTENTIAL BUG: code isn't cli'd 
 */
 void  Event_Wait( EVENT *e ) {
-<<<<<<< HEAD
 	if (e->flag == 1){
 		e->flag=0;
-=======
 	if (currentTask->level == PERIODIC) OS_Abort;
 	/*abort if a periodic task tries to wait*/
 	if (event_list[e]->flag == 1){ 
@@ -506,7 +504,6 @@ void  Event_Wait( EVENT *e ) {
 		/* POTENTIAL BUG: make sure that we do indeed always need to send the task to the sleep queue*/
 		
 		event_list[e]->waiting_task = currentTask;
->>>>>>> db3938fdcedc84586d082c34387435b2fb02d10b
 		Event_Signal(e);
 
 	} else { /* if no events have arrived */
