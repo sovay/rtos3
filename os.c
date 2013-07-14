@@ -573,10 +573,19 @@ void  Event_Async_Signal( EVENT *e ) {
 /* end event section */
 
 unsigned int Now() {
-	return cur_ticks*5;
-	//TCNT2;
+	unsigned int i = 0;
+	sreg = SREG;
+	cli();
+	i = TCNT2;
+	SREG = sreg;
+	i = (i/11059) + cur_ticks;
+	return i;
+	
 }
 
+void Reset_Now(unsigned int global_ticks) {
+	cur_ticks = global_ticks;
+}
 
 
 /**
