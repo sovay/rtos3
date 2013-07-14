@@ -566,7 +566,7 @@ unsigned int Now() {
 	cli();
 	i = TCNT2;
 	SREG = sreg;
-	i = (i/11590) + cur_ticks;
+	i = (i/11059) + cur_ticks;
 	return i;
 	
 }
