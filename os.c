@@ -117,20 +117,6 @@
     "pop    r31             \n\t"\
 	"out    __SREG__, r31    \n\t"\
     "pop    r31             \n\t"::);
-/**
- * @brief Contains all information of a given task.
- */
-
-static uint8_t num_events_created = 0;
-static EVENT event_list[MAXEVENT];
-static unsigned int cur_ticks = 0;
-static unsigned int inittime = 0;
-static unsigned int endtime = 0;
-
-typedef struct  Event_Struct {
-	unsigned flag:1;
-	Task_t waiting_task;
-} EVENT;
 
 /**
  * @brief This is the set of states that a task can be in at any given time.
@@ -139,14 +125,17 @@ typedef enum {
 	DEAD = 0, RUNNING, READY, WAITING, SLEEPING
 } taskState_t;
 
-typedef struct Task_Struct 
+typedef struct Task_Struct Task_t;
+
+struct Task_Struct 
 {
-	void (* function)(void) = NULL;
+	void (* function)(void);
 	int argument;
 	uint8_t stack[MAXSTACK];
-	uint8_t volatile * stackPointer = NULL;
+	uint8_t volatile * stackPointer;
 	uint8_t level;
 	taskState_t state;
+	uint8_t ticksTaken;
 	//periodic only
 	//TODO maybe just use unsigned int? (params to task create periodic)
 	uint16_t wcet; //worst case execution time
@@ -156,7 +145,21 @@ typedef struct Task_Struct
 	//intrusive linked list
 	Task_t * next;
 	Task_t * prev;
-} Task_t;
+};
+
+/**
+ * @brief Contains all information of a given task.
+ */
+typedef struct  Event_Struct {
+	unsigned flag:1;
+	Task_t waiting_task;
+} EVENT;
+
+static uint8_t num_events_created = 0;
+static EVENT event_list[MAXEVENT];
+static unsigned int cur_ticks = 0;
+static unsigned int inittime = 0;
+static unsigned int endtime = 0;
 
 /**
  * @brief This is the set of kernel requests, i.e., a request code for each system call.
@@ -205,7 +208,7 @@ void queuePush(taskQueue_t * q, Task_t * task)
 
 void queueAddFront(taskQueue_t * q, Task_t * task)
 {
-	if(q->head == SNULL) {
+	if(q->head == NULL) {
 		q->head = q->tail = task;
     } else {
 		q->head->prev = task;
@@ -234,7 +237,7 @@ Task_t * queuePop(taskQueue_t * q)
 
 void queueAddSortedByTicksUntilReady(taskQueue_t * q, Task_t * task)
 {
-	if (q->head = NULL)
+	if (q->head == NULL)
 	{
 		q->head = q->tail = task;
 		return;
@@ -243,7 +246,7 @@ void queueAddSortedByTicksUntilReady(taskQueue_t * q, Task_t * task)
 		if(q->head->ticksUntilReady > task->ticksUntilReady) {
 			queueAddFront(q,task);
 		} else {
-			queuePush(q,task)
+			queuePush(q,task);
 		}
 	}
 	for (Task_t * ptr = q->tail; ptr != q->head; ptr = ptr->prev)
@@ -251,7 +254,7 @@ void queueAddSortedByTicksUntilReady(taskQueue_t * q, Task_t * task)
 		if (ptr->prev->ticksUntilReady > task->ticksUntilReady)
 		{
 			task->prev = ptr->prev->prev;
-			task->next = ptr->prev
+			task->next = ptr->prev;
 			ptr->prev->prev = task;
 			ptr->prev->next = ptr;		
 		}
@@ -265,6 +268,7 @@ static volatile Task_t* currentTask = NULL;
 static volatile Task_t* const idleTask = &Tasks[MAXPROCESS];
 static volatile uint16_t kernelStackPointer;
 static volatile kernelRequest_t kernelRequest;
+static volatile kernelNewTaskLevel = 0;
 //one for each RR, PERIODIC, and SYSTEM 
 //RR, PERIODIC and SYSTEM, are defined to 1-3 respectively
 //having 4 of these allows nice indexing like readyQueue[RR], without needing -1 on every index
@@ -323,11 +327,13 @@ void OS_Abort(void) {
 
 int Task_Create_Common(void (*f)(void), int arg, uint8_t level, Task_t * task)
 {
-	task->function = f;
-	task->argument = arg;
-	task->level    = level;
-	task->wcet     = 0;
-	task->state    = READY;
+	task->function   = f;
+	task->argument   = arg;
+	task->level      = level;
+	task->wcet       = 0;
+	task->state      = READY;
+	task->ticksTaken = 0;
+	kernelRequest    = TASK_CREATE;
 	/* The stack grows down in memory, so the stack pointer is going to end up
 	 * pointing to the location 32 + 1 + 2 + 2 = 37 bytes above the bottom, to make
 	 * room for (from bottom to top):
@@ -368,9 +374,11 @@ int   Task_Create_System(void (*f)(void), int arg)
 	Task_Create_Common(f, arg, SYSTEM, task);
 	queuePush(&readyQueue[SYSTEM], task);
 	NUM_TASKS_IN_USE++;
+	kernelNewTaskLevel = SYSTEM;
+	
+	enterKernel();
 	
 	SREG = sreg;
-	
 	return 0;
 }
 
@@ -385,9 +393,11 @@ int   Task_Create_RR(void (*f)(void), int arg)
 	Task_Create_Common(f, arg, RR), task;
 	queuePush(&readyQueue[RR], task);
 	NUM_TASKS_IN_USE++;
+	kernelNewTaskLevel = RR;
+	
+	enterKernel();
 	
 	SREG = sreg;
-	
 	return 0;
 }
 
@@ -404,9 +414,11 @@ int   Task_Create_Period(void (*f)(void), int arg, unsigned int period, unsigned
 	Tasks[NUM_TASKS_IN_USE].ticksUntilReady = start;
 	queueAddSortedByTicksUntilReady(&readyQueue[PERIODIC], task); 
 	NUM_TASKS_IN_USE++;
+	kernelNewTaskLevel = PERIODIC;
+	
+	enterKernel();
 	
 	SREG = sreg;
-	
 	return 0;
 }
 
@@ -584,7 +596,7 @@ static void kernelSchedule(void)
 		{
 			currentTask = queuePop(&readyQueue[SYSTEM].head);
 		}
-		else if (readyQueue[PERIODIC].head != NULL && readyQueue[PERIODIC].head->ticksUntilReady == 0)
+		else if (readyQueue[PERIODIC].head != NULL && readyQueue[PERIODIC].head->ticksUntilReady <= 0)
 		{
 			currentTask = queuePop(&readyQueue[PERIODIC].head);
 		}
@@ -606,6 +618,38 @@ static void kernelUpdate(void)
 	case TASK_NEXT:
 		queuePush(&readyQueue[currentTask->level]);
 		currentTask->state = READY;
+		currentTask->ticksTaken = 0;
+	break;
+	case TIMER_EXPIRED:
+		Task_t * p;
+		for (p = readyQueue[PERIODIC]->head; p != NULL && p != readyQueue[PERIODIC]->tail; p = p->next)
+		{
+			p->ticksUntilReady--;
+		}
+		currentTask->ticksTaken++;
+		//TODO these should have more granularity with Now
+		if (currentTask->level == PERIODIC && currentTask->ticksTaken > currentTask->wcet )
+		{
+			OS_Abort();
+		} else if (currentTask->level == RR && currentTask->ticksTaken*5 >= QUANTUM)
+		{
+			currentTask->state = READY;
+			currentTask->ticksTaken = 0;
+			queuePush(&readyQueue[currentTask->level]);
+		}
+	break;
+	case TASK_CREATE:
+		if (kernelNewTaskLevel > currentTask->level)
+		{
+			//might get preempted
+			//TODO do stuff with now
+			//round robin being preempted, add it to the front of the ready queue
+			if (currentTask->level == RR)
+			{
+				currentTask->state = READY;
+				queueAddFront(&readyQueue[RR], currentTask);
+			}
+		}
 	break;
 	}
 }
@@ -613,7 +657,9 @@ static void kernelUpdate(void)
 static void kernelMainLoop(void) 
 {
 	for (;;) {
-		
+		kernelUpdate();
+		kernelSchedule();
+		exitKernel();
 	}
 }
 
@@ -637,8 +683,8 @@ int OS_Init(void)
 	NUM_TASKS_IN_USE++;
 	
 	//setup timers
-	TCCR2B &= ~(_BV(CS12)| _BV(CS11));
-	TCCR2B |= (_BV(CS10));		// start the timer at fclk/1
+	TCCR2B &= ~(_BV(CS22)| _BV(CS21));
+	TCCR2B |= (_BV(CS20));		// start the timer at fclk/1
 	
 	/* Set up Timer 2 Output Compare interrupt,the TICK clock. */
 	TIMSK2 |= _BV(OCIE2A);
