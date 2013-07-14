@@ -6,14 +6,27 @@
  *  Based off of Scott Craig and Justin Tanner's OS, provided and edited by Neil MacMillan
  */ 
 
-
+#define F_CPU 11059200
 #include <avr/io.h>
 #include <avr/interrupt.h>
+#include <util/delay.h>
 
 #include "os.h"
+#include "error_code.h"
 
 /** The number of clock cycles in one "tick" or 5 ms */
 #define TICK_CYCLES     (F_CPU / 1000 * TICK)
+
+#define LED_DDR DDRB
+#define LED_PORT PORTB
+
+/** LEDs for OS_Abort() */
+#define LED_RED_MASK    _BV(PB1)	// LED2 on xplained
+
+/** LEDs for OS_Abort() */
+#define LED_GREEN_MASK    _BV(PB2)	// LED3 on xplained
+/** Error message used in OS_Abort() */
+static uint8_t volatile error_msg = ERR_RUN_1_USER_CALLED_OS_ABORT;
 
 /*
  * Context switching
@@ -150,34 +163,33 @@ struct Task_Struct
 /**
  * @brief Contains all information of a given task.
  */
-typedef struct  Event_Struct {
+struct event {
 	unsigned flag:1;
-	Task_t waiting_task;
-} EVENT;
+	Task_t * waiting_task;
+};
 
 static uint8_t num_events_created = 0;
 static EVENT event_list[MAXEVENT];
 static unsigned int cur_ticks = 0;
-static unsigned int inittime = 0;
-static unsigned int endtime = 0;
 
 /**
  * @brief This is the set of kernel requests, i.e., a request code for each system call.
+ * Uncomment when needed
  */
 typedef enum {
 	NONE = 0,
 	TIMER_EXPIRED,
 	TASK_CREATE,
-	TASK_TERMINATE,
+	//TASK_TERMINATE,
 	TASK_NEXT,
-	TASK_GET_ARG,
-	TASK_SLEEP,
-	EVENT_INIT,
-	EVENT_WAIT,
-	EVENT_SIGNAL,
-	EVENT_BROADCAST,
-	EVENT_SIGNAL_AND_NEXT,
-	EVENT_BROADCAST_AND_NEXT
+	//TASK_GET_ARG,
+	//TASK_SLEEP,
+	//EVENT_INIT,
+	//EVENT_WAIT,
+	//EVENT_SIGNAL,
+	//EVENT_BROADCAST,
+	//EVENT_SIGNAL_AND_NEXT,
+	//EVENT_BROADCAST_AND_NEXT
 } kernelRequest_t;
 
 /**
@@ -189,6 +201,12 @@ typedef struct {
 	/** The last item in the queue. Undefined if the queue is empty. */
 	Task_t * tail;
 } taskQueue_t;
+
+
+//forward declerations
+static void enterKernel(void) __attribute((noinline, naked));
+static void exitKernel(void)  __attribute((noinline, naked));
+void TIMER2_COMPA_vect(void) __attribute__ ((signal, naked));
 
 void queueInit(taskQueue_t * q)
 {
@@ -262,18 +280,99 @@ void queueAddSortedByTicksUntilReady(taskQueue_t * q, Task_t * task)
 }
 
 //Kernel Globals
-static volatile Task_t  Tasks[MAXPROCESS + 1]; //extra space for idle
+static Task_t  Tasks[MAXPROCESS + 1]; //extra space for idle
 static volatile uint8_t NUM_TASKS_IN_USE = 0; 
-static volatile Task_t* currentTask = NULL;
-static volatile Task_t* const idleTask = &Tasks[MAXPROCESS];
+static Task_t* currentTask = NULL;
+static Task_t* const idleTask = &Tasks[MAXPROCESS];
 static volatile uint16_t kernelStackPointer;
 static volatile kernelRequest_t kernelRequest;
-static volatile kernelNewTaskLevel = 0;
+static volatile uint8_t kernelNewTaskLevel = 0;
 //one for each RR, PERIODIC, and SYSTEM 
 //RR, PERIODIC and SYSTEM, are defined to 1-3 respectively
 //having 4 of these allows nice indexing like readyQueue[RR], without needing -1 on every index
 //TODO may not need queue for system
-static volatile taskQueue_t readyQueue[4]; 
+static taskQueue_t readyQueue[4]; 
+
+static void enterKernel(void) {
+	/*
+	 * The PC was pushed on the stack with the call to this function.
+	 * Now push on the I/O registers and the SREG as well.
+	 */
+	SAVE_CTX();
+
+	/*
+	 * The last piece of the context is the SP. Save it to a variable.
+	 */
+	currentTask->stackPointer = (uint8_t*) SP;
+
+	/*
+	 * Now restore the kernel's context, SP first.
+	 */
+	SP = kernelStackPointer;
+
+	/*
+	 * Now restore I/O and SREG registers.
+	 */
+	RESTORE_CTX();
+
+	/*
+	 * return explicitly required as we are "naked".
+	 *
+	 * The last piece of the context, the PC, is popped off the stack
+	 * with the ret instruction.
+	 */
+	asm volatile ("ret\n"::);
+}
+
+
+/**
+ * @fn exitKernel
+ *
+ * @brief The actual context switching code begins here.
+ *
+ * This function is called by the kernel. Upon entry, we are using
+ * the kernel stack, on top of which is the address of the instruction
+ * after the call to exitKernel().
+ *
+ * Assumption: Our kernel is executed with interrupts already disabled.
+ *
+ * The "naked" attribute prevents the compiler from adding instructions
+ * to save and restore register values. It also prevents an
+ * automatic return instruction.
+ */
+static void exitKernel(void) {
+	/*
+	 * The PC was pushed on the stack with the call to this function.
+	 * Now push on the I/O registers and the SREG as well.
+	 */
+	SAVE_CTX();
+
+	/*
+	 * The last piece of the context is the SP. Save it to a variable.
+	 */
+	kernelStackPointer = SP;
+
+	/*
+	 * Now restore the task's context, SP first.
+	 */
+	SP = (uint16_t) (currentTask->stackPointer);
+
+	/*
+	 * Now restore I/O and SREG registers.
+	 */
+	RESTORE_CTX();
+
+	/*
+	 * return explicitly required as we are "naked".
+	 * Interrupts are enabled or disabled according to SREG
+	 * recovered from stack, so we don't want to explicitly
+	 * enable them here.
+	 *
+	 * The last piece of the context, the PC, is popped off the stack
+	 * with the ret instruction.
+	 */
+	asm volatile ("ret\n"::);
+}
 
 void OS_Abort(void) {
 	uint8_t i, j;
@@ -325,7 +424,7 @@ void OS_Abort(void) {
 	}
 }
 
-int Task_Create_Common(void (*f)(void), int arg, uint8_t level, Task_t * task)
+void Task_Create_Common(void (*f)(void), int arg, uint8_t level, Task_t * task)
 {
 	task->function   = f;
 	task->argument   = arg;
@@ -344,7 +443,7 @@ int Task_Create_Common(void (*f)(void), int arg, uint8_t level, Task_t * task)
 	 *   registers 30 to 0.
 	 */
 	uint8_t *stackTop;
-	stackTop     = task->stack[0];
+	stackTop     = &task->stack[0];
 	stackTop[2]  = (uint8_t) 0; //register r1 is 0
 	/* stackTop[31] is r30. */
 	stackTop[32] = (uint8_t) _BV(SREG_I); /* set SREG_I bit in stored SREG. */
@@ -357,7 +456,7 @@ int Task_Create_Common(void (*f)(void), int arg, uint8_t level, Task_t * task)
 	 * second), even though the AT90 is LITTLE ENDIAN machine.
 	 */
 	stackTop[34] = (uint8_t) ((uint16_t) f >> 8);
-	stackTop[35] = (uint8_t) (uint16_t)  f);
+	stackTop[35] = (uint8_t) ((uint16_t)  f);
 	stackTop[36] = (uint8_t) ((uint16_t) Task_Terminate >> 8);
 	stackTop[37] = (uint8_t) (uint16_t)  Task_Terminate;
 	task->stackPointer = stackTop;
@@ -390,7 +489,7 @@ int   Task_Create_RR(void (*f)(void), int arg)
 	
 	if (NUM_TASKS_IN_USE >= MAXPROCESS + 1) return -1; //error to many procs
 	Task_t * task = queuePop(&readyQueue[0]);
-	Task_Create_Common(f, arg, RR), task;
+	Task_Create_Common(f, arg, RR, task);
 	queuePush(&readyQueue[RR], task);
 	NUM_TASKS_IN_USE++;
 	kernelNewTaskLevel = RR;
@@ -456,7 +555,7 @@ int   Task_GetArg(void)
 	sreg = SREG;
 	cli();
 
-	arg = currentTask->arg;
+	arg = currentTask->argument;
 
 	SREG = sreg;
 
@@ -492,7 +591,7 @@ EVENT *Event_Init(void) {
 clears occurances of event e 
 */
 void  Event_Clear( EVENT *e ) {
-	event_list[e]->flag = 0;
+	event_list[(uint16_t)e].flag = 0;
 }  
 
 /* 
@@ -502,28 +601,23 @@ if 0, waits for next event
 POTENTIAL BUG: code isn't cli'd 
 */
 void  Event_Wait( EVENT *e ) {
-	if (e->flag == 1){
-		e->flag=0;
-	if (currentTask->level == PERIODIC) OS_Abort;
+	uint8_t sreg;
+	sreg = SREG;
+	cli();
+	
+	if (currentTask->level == PERIODIC) OS_Abort();
 	/*abort if a periodic task tries to wait*/
-	if (event_list[e]->flag == 1){ 
-	/* check if an event is already waiting */
-		
-		event_list[e]->flag==0; 
-		/* if so, consume flag, set task to sleepqueue, pop it off sleep queue */
-		
-		queuePop(readyQueue[currentTask->level]); 
-		/* POTENTIAL BUG: make sure that we do indeed always need to send the task to the sleep queue*/
-		
-		event_list[e]->waiting_task = currentTask;
-		Event_Signal(e);
-
+	if (event_list[(uint16_t)e].flag == 1){ 
+		event_list[(uint16_t)e].flag = 0; 
 	} else { /* if no events have arrived */
-		if (event_list[e]->waiting_task != NULL) OS_Abort;
+		if (event_list[(uint16_t)e].waiting_task != NULL) OS_Abort();
 		/* only one task can wait per event */
-		queuePop(readyQueue[currentTask->level]);
-		event_list[e]->waiting_task = currentTask;
+		queuePop(&readyQueue[currentTask->level]);
+		event_list[(uint16_t)e].waiting_task = currentTask;
+		currentTask->state = SLEEPING;
 	}
+	
+	SREG = sreg;
 }
 
 /*
@@ -536,31 +630,30 @@ and make sure this added task doesnt preempt a current task if
 they have the same priority
 */
 void taskToReady(EVENT* e) {
-	if (event_list[e]->waiting_task==NULL) OS_Abort;
-	queueAddFront(event_list[e]->waiting_task);
-	event_list[e]->waiting_task = NULL;
+	if (event_list[(uint16_t)e].waiting_task==NULL) OS_Abort();
+	queueAddFront(&readyQueue[currentTask->level], event_list[(uint16_t)e].waiting_task);
+	event_list[(uint16_t)e].waiting_task = NULL;
+	currentTask->state = READY;
 }
 
 /* 
 clears flag, waits for next event 
 */
 void  Event_Wait_Next( EVENT *e ) {
-	e->flag = 0;
-	e->waiting_task = currentTask;
-	event_list[e]->flag == 0;
-	if (event_list[e]->waiting_task != NULL) OS_Abort;
-	queuePop(readyQueue[currentTask->level]);
-	event_list[e]->waiting_task = currentTask;
+	event_list[(uint16_t)e].flag = 0;
+	if (event_list[(uint16_t)e].waiting_task != NULL) OS_Abort();
+	queuePop(&readyQueue[currentTask->level]);
+	event_list[(uint16_t)e].waiting_task = currentTask;
 }
 
 /* 
 signals waiting task, or, if there are none, sets the flag
  */
 void  Event_Signal( EVENT *e ) {
-	if (event_list[e]->waiting_task!=NULL) {
+	if (event_list[(uint16_t)e].waiting_task!=NULL) {
 		taskToReady(e);
 	}
-	else event_list[e]->flag = 1;
+	else event_list[(uint16_t)e].flag = 1;
 
 }
 
@@ -573,6 +666,7 @@ void  Event_Async_Signal( EVENT *e ) {
 /* end event section */
 
 unsigned int Now() {
+	uint8_t sreg;
 	unsigned int i = 0;
 	sreg = SREG;
 	cli();
@@ -603,15 +697,15 @@ static void kernelSchedule(void)
 	{
 		if (readyQueue[SYSTEM].head != NULL)
 		{
-			currentTask = queuePop(&readyQueue[SYSTEM].head);
+			currentTask = queuePop(&readyQueue[SYSTEM]);
 		}
 		else if (readyQueue[PERIODIC].head != NULL && readyQueue[PERIODIC].head->ticksUntilReady <= 0)
 		{
-			currentTask = queuePop(&readyQueue[PERIODIC].head);
+			currentTask = queuePop(&readyQueue[PERIODIC]);
 		}
 		else if (readyQueue[RR].head != NULL)
 		{
-			currentTask = queuePop(&readyQueue[RR].head);
+			currentTask = queuePop(&readyQueue[RR]);
 		}
 		else
 		{
@@ -625,13 +719,12 @@ static void kernelUpdate(void)
 {
 	switch (kernelRequest) {
 	case TASK_NEXT:
-		queuePush(&readyQueue[currentTask->level]);
+		queuePush(&readyQueue[currentTask->level], currentTask);
 		currentTask->state = READY;
 		currentTask->ticksTaken = 0;
 	break;
 	case TIMER_EXPIRED:
-		Task_t * p;
-		for (p = readyQueue[PERIODIC]->head; p != NULL && p != readyQueue[PERIODIC]->tail; p = p->next)
+		for (Task_t *p = readyQueue[PERIODIC].head; p != NULL && p != readyQueue[PERIODIC].tail; p = p->next)
 		{
 			p->ticksUntilReady--;
 		}
@@ -644,7 +737,7 @@ static void kernelUpdate(void)
 		{
 			currentTask->state = READY;
 			currentTask->ticksTaken = 0;
-			queuePush(&readyQueue[currentTask->level]);
+			queuePush(&readyQueue[currentTask->level], currentTask);
 		}
 	break;
 	case TASK_CREATE:
@@ -660,6 +753,8 @@ static void kernelUpdate(void)
 			}
 		}
 	break;
+	case NONE:
+	break;
 	}
 }
 
@@ -672,14 +767,8 @@ static void kernelMainLoop(void)
 	}
 }
 
-static void kernel_update_ticker(void) {
-	/* update the tick count each time we enter this function (timed interrupt fires once/tick) */
-	cur_ticks++;
-}
-
-int OS_Init(void)
+void OS_Init(void)
 {
-	int i;
 	//push all descriptors onto ready to use descriptor queue
 	for (int i = 0; i < MAXPROCESS; i++)
 	{
@@ -701,39 +790,16 @@ int OS_Init(void)
 	OCR2A = TCNT2 + TICK_CYCLES;
 	/* Clear flag. */
 	TIFR2 = _BV(OCF2A);
+	
+	kernelMainLoop();
 }
 
-static void enterKernel(void) {
-	/*
-	 * The PC was pushed on the stack with the call to this function.
-	 * Now push on the I/O registers and the SREG as well.
-	 */
-	SAVE_CTX();
-
-	/*
-	 * The last piece of the context is the SP. Save it to a variable.
-	 */
-	cur_task->sp = (uint8_t*) SP;
-
-	/*
-	 * Now restore the kernel's context, SP first.
-	 */
-	SP = kernel_sp;
-
-	/*
-	 * Now restore I/O and SREG registers.
-	 */
-	RESTORE_CTX();
-
-	/*
-	 * return explicitly required as we are "naked".
-	 *
-	 * The last piece of the context, the PC, is popped off the stack
-	 * with the ret instruction.
-	 */
-	asm volatile ("ret\n"::);
+int main(void)
+{
+	OS_Init();
+	for(;;);
+	return 0;
 }
-
 /**
  * @fn TIMER2_COMPA_vect
  *
@@ -748,7 +814,7 @@ static void enterKernel(void) {
  * to save and restore register values. It also prevents an
  * automatic return instruction.
  */
-void TIMER2_COMPA_vect(void) __attribute__ ((signal, naked));
+void TIMER2_COMPA_vect(void)
 {
 	/*
 	 * Save the interrupted task's context on its stack,
