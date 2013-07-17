@@ -145,7 +145,7 @@ struct Task_Struct
 	void (* function)(void);
 	int argument;
 	uint8_t stack[MAXSTACK];
-	uint8_t volatile * stackPointer;
+	uint8_t* volatile stackPointer;
 	uint8_t level;
 	taskState_t state;
 	uint8_t ticksTaken;
@@ -189,7 +189,8 @@ typedef enum {
 	//EVENT_SIGNAL,
 	//EVENT_BROADCAST,
 	//EVENT_SIGNAL_AND_NEXT,
-	//EVENT_BROADCAST_AND_NEXT
+	//EVENT_BROADCAST_AND_NEXT,
+	KERNEL_REQUEST_COUNT
 } kernelRequest_t;
 
 /**
@@ -281,7 +282,7 @@ void queueAddSortedByTicksUntilReady(taskQueue_t * q, Task_t * task)
 
 //Kernel Globals
 static Task_t  Tasks[MAXPROCESS + 1]; //extra space for idle
-static volatile uint8_t NUM_TASKS_IN_USE = 0; 
+static uint8_t NUM_TASKS_IN_USE = 0; 
 static Task_t* currentTask = NULL;
 static Task_t* const idleTask = &Tasks[MAXPROCESS];
 static volatile uint16_t kernelStackPointer;
@@ -424,8 +425,9 @@ void OS_Abort(void) {
 	}
 }
 
-void Task_Create_Common(void (*f)(void), int arg, uint8_t level, Task_t * task)
+static void Task_Create_Common(void (*f)(void), int arg, uint8_t level, Task_t * task)
 {
+	NUM_TASKS_IN_USE++;
 	task->function   = f;
 	task->argument   = arg;
 	task->level      = level;
@@ -442,11 +444,12 @@ void Task_Create_Common(void (*f)(void), int arg, uint8_t level, Task_t * task)
 	 *   the stored SREG, and
 	 *   registers 30 to 0.
 	 */
-	uint8_t *stackTop;
-	stackTop     = &task->stack[0];
-	stackTop[2]  = (uint8_t) 0; //register r1 is 0
+	uint8_t *stackBottom;
+	stackBottom       = &(task->stack[MAXSTACK - 1]);
+	uint8_t *stackTop = stackBottom - (32 + 1 + 2 + 2);
+	stackTop[2]       = (uint8_t) 0; //register r1 is 0
 	/* stackTop[31] is r30. */
-	stackTop[32] = (uint8_t) _BV(SREG_I); /* set SREG_I bit in stored SREG. */
+	stackTop[32]      = (uint8_t) _BV(SREG_I); /* set SREG_I bit in stored SREG. */
 	/* stackTop[33] is r31. */
 	
 	/* We are placing the address (16-bit) of the functions
@@ -472,7 +475,6 @@ int   Task_Create_System(void (*f)(void), int arg)
 	Task_t * task = queuePop(&readyQueue[0]);
 	Task_Create_Common(f, arg, SYSTEM, task);
 	queuePush(&readyQueue[SYSTEM], task);
-	NUM_TASKS_IN_USE++;
 	kernelNewTaskLevel = SYSTEM;
 	
 	enterKernel();
@@ -491,7 +493,6 @@ int   Task_Create_RR(void (*f)(void), int arg)
 	Task_t * task = queuePop(&readyQueue[0]);
 	Task_Create_Common(f, arg, RR, task);
 	queuePush(&readyQueue[RR], task);
-	NUM_TASKS_IN_USE++;
 	kernelNewTaskLevel = RR;
 	
 	enterKernel();
@@ -509,10 +510,9 @@ int   Task_Create_Period(void (*f)(void), int arg, unsigned int period, unsigned
 	if (NUM_TASKS_IN_USE >= MAXPROCESS + 1) return -1; //error to many procs
 	Task_t * task = queuePop(&readyQueue[0]);
 	Task_Create_Common(f, arg, PERIODIC, task);
-	Tasks[NUM_TASKS_IN_USE].wcet = wcet;
-	Tasks[NUM_TASKS_IN_USE].ticksUntilReady = start;
+	task->wcet = wcet;
+	task->ticksUntilReady = start;
 	queueAddSortedByTicksUntilReady(&readyQueue[PERIODIC], task); 
-	NUM_TASKS_IN_USE++;
 	kernelNewTaskLevel = PERIODIC;
 	
 	enterKernel();
@@ -693,7 +693,7 @@ static void idle(void)
 
 static void kernelSchedule(void)
 {
-	if (currentTask->state != RUNNING && currentTask == idleTask)
+	if (currentTask->state != RUNNING || currentTask == idleTask)
 	{
 		if (readyQueue[SYSTEM].head != NULL)
 		{
@@ -719,6 +719,7 @@ static void kernelUpdate(void)
 {
 	switch (kernelRequest) {
 	case TASK_NEXT:
+		currentTask->ticksUntilReady = currentTask->wcet;
 		queuePush(&readyQueue[currentTask->level], currentTask);
 		currentTask->state = READY;
 		currentTask->ticksTaken = 0;
@@ -755,7 +756,11 @@ static void kernelUpdate(void)
 	break;
 	case NONE:
 	break;
+	case KERNEL_REQUEST_COUNT:
+		OS_Abort();
+	break;
 	}
+	kernelRequest = NONE;
 }
 
 static void kernelMainLoop(void) 
@@ -767,8 +772,19 @@ static void kernelMainLoop(void)
 	}
 }
 
+extern void r_main(void);
+
 void OS_Init(void)
 {
+	for (int i = 0; i<= SYSTEM; i++)
+	{
+		queueInit(&readyQueue[i]);
+	}
+		
+	//setup timers
+	TCCR2B &= ~(_BV(CS22)| _BV(CS21));
+	TCCR2B |= (_BV(CS20));		// start the timer at fclk/1
+	
 	//push all descriptors onto ready to use descriptor queue
 	for (int i = 0; i < MAXPROCESS; i++)
 	{
@@ -777,12 +793,7 @@ void OS_Init(void)
 	}
     //create idle task
 	Tasks[MAXPROCESS].state = READY;
-	Task_Create_Common(idle, NULL, NULL, &Tasks[MAXPROCESS]);
-	NUM_TASKS_IN_USE++;
-	
-	//setup timers
-	TCCR2B &= ~(_BV(CS22)| _BV(CS21));
-	TCCR2B |= (_BV(CS20));		// start the timer at fclk/1
+	Task_Create_Common(idle, 0, 0, &Tasks[MAXPROCESS]);
 	
 	/* Set up Timer 2 Output Compare interrupt,the TICK clock. */
 	TIMSK2 |= _BV(OCIE2A);
@@ -791,11 +802,27 @@ void OS_Init(void)
 	/* Clear flag. */
 	TIFR2 = _BV(OCF2A);
 	
+	LED_DDR = 0xFF;
+	
+	/* Initialize the now counter */
+	cur_ticks = 0;
+	
+	//Special case do not want to enter kernel on first creation
+	//Task_Create_System(r_main, 0);
+	Task_t * task = queuePop(&readyQueue[0]);
+	Task_Create_Common(r_main, 0, SYSTEM, task);
+	queuePush(&readyQueue[SYSTEM], task);
+	
+	currentTask = idleTask;
+	currentTask->state = RUNNING;
+	kernelRequest = NONE;
+
 	kernelMainLoop();
 }
 
 int main(void)
 {
+	SP = 0x4000;
 	OS_Init();
 	for(;;);
 	return 0;
