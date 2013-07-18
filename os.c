@@ -10,6 +10,7 @@
 #include <avr/io.h>
 #include <avr/interrupt.h>
 #include <util/delay.h>
+#include <string.h>
 
 #include "os.h"
 #include "error_code.h"
@@ -28,109 +29,10 @@
 /** Error message used in OS_Abort() */
 static uint8_t volatile error_msg = ERR_RUN_1_USER_CALLED_OS_ABORT;
 
-/*
- * Context switching
- */
-/**
- * @brief Push all the registers and SREG onto the stack.
- */
-#define    SAVE_CTX()    SAVE_CTX_TOP();SAVE_CTX_BOTTOM();
-/**
- * It is important to keep the order of context saving and restoring exactly
- * in reverse. Also, when a new task is created, it is important to
- * initialize its "initial" context in the same order as a saved context.
- *
- * Save r31 and SREG on stack, disable interrupts, then save
- * the rest of the registers on the stack. In the locations this macro
- * is used, the interrupts need to be disabled, or they already are disabled.
- */
-
-#define    SAVE_CTX_TOP()       asm volatile (\
-    "push   r31             \n\t"\
-    "in     r31,__SREG__    \n\t"\
-    "cli                    \n\t"::); /* Disable interrupt */
-
-#define STACK_SREG_SET_I_BIT()    asm volatile (\
-    "ori    r31, 0x80        \n\t"::);
-
-#define    SAVE_CTX_BOTTOM()       asm volatile (\
-    "push   r31             \n\t"\
-    "push   r30             \n\t"\
-    "push   r29             \n\t"\
-    "push   r28             \n\t"\
-    "push   r27             \n\t"\
-    "push   r26             \n\t"\
-    "push   r25             \n\t"\
-    "push   r24             \n\t"\
-    "push   r23             \n\t"\
-    "push   r22             \n\t"\
-    "push   r21             \n\t"\
-    "push   r20             \n\t"\
-    "push   r19             \n\t"\
-    "push   r18             \n\t"\
-    "push   r17             \n\t"\
-    "push   r16             \n\t"\
-    "push   r15             \n\t"\
-    "push   r14             \n\t"\
-    "push   r13             \n\t"\
-    "push   r12             \n\t"\
-    "push   r11             \n\t"\
-    "push   r10             \n\t"\
-    "push   r9              \n\t"\
-    "push   r8              \n\t"\
-    "push   r7              \n\t"\
-    "push   r6              \n\t"\
-    "push   r5              \n\t"\
-    "push   r4              \n\t"\
-    "push   r3              \n\t"\
-    "push   r2              \n\t"\
-    "push   r1              \n\t"\
-    "push   r0              \n\t"::);
-
-/**
- * @brief Push all the registers and SREG onto the stack.
- */
-#define    SAVE_CTX()    SAVE_CTX_TOP();SAVE_CTX_BOTTOM();
-
-/**
- * @brief Pop all registers and the status register.
- */
-#define    RESTORE_CTX()    asm volatile (\
-    "pop    r0              \n\t"\
-    "pop    r1              \n\t"\
-    "pop    r2              \n\t"\
-    "pop    r3              \n\t"\
-    "pop    r4              \n\t"\
-    "pop    r5              \n\t"\
-    "pop    r6              \n\t"\
-    "pop    r7              \n\t"\
-    "pop    r8              \n\t"\
-    "pop    r9              \n\t"\
-    "pop    r10             \n\t"\
-    "pop    r11             \n\t"\
-    "pop    r12             \n\t"\
-    "pop    r13             \n\t"\
-    "pop    r14             \n\t"\
-    "pop    r15             \n\t"\
-    "pop    r16             \n\t"\
-    "pop    r17             \n\t"\
-    "pop    r18             \n\t"\
-    "pop    r19             \n\t"\
-    "pop    r20             \n\t"\
-    "pop    r21             \n\t"\
-    "pop    r22             \n\t"\
-    "pop    r23             \n\t"\
-    "pop    r24             \n\t"\
-    "pop    r25             \n\t"\
-    "pop    r26             \n\t"\
-    "pop    r27             \n\t"\
-    "pop    r28             \n\t"\
-    "pop    r29             \n\t"\
-    "pop    r30             \n\t"\
-    "pop    r31             \n\t"\
-	"out    __SREG__, r31    \n\t"\
-    "pop    r31             \n\t"::);
-
+#define Disable_Interrupt()		asm volatile ("cli"::)
+#define Enable_Interrupt()		asm volatile ("sei"::)
+extern void Enter_Kernel();
+extern void Exit_Kernel(); 
 /**
  * @brief This is the set of states that a task can be in at any given time.
  */
@@ -150,7 +52,6 @@ struct Task_Struct
 	taskState_t state;
 	uint8_t ticksTaken;
 	//periodic only
-	//TODO maybe just use unsigned int? (params to task create periodic)
 	uint16_t wcet; //worst case execution time
 	uint16_t period;
 	uint16_t offset;
@@ -170,7 +71,7 @@ struct event {
 
 static uint8_t num_events_created = 0;
 static EVENT event_list[MAXEVENT];
-static unsigned int cur_ticks = 0;
+static volatile unsigned int cur_ticks = 0;
 
 /**
  * @brief This is the set of kernel requests, i.e., a request code for each system call.
@@ -180,7 +81,7 @@ typedef enum {
 	NONE = 0,
 	TIMER_EXPIRED,
 	TASK_CREATE,
-	//TASK_TERMINATE,
+	TASK_TERMINATE,
 	TASK_NEXT,
 	//TASK_GET_ARG,
 	//TASK_SLEEP,
@@ -205,8 +106,8 @@ typedef struct {
 
 
 //forward declerations
-static void enterKernel(void) __attribute((noinline, naked));
-static void exitKernel(void)  __attribute((noinline, naked));
+//static void enterKernel(void) __attribute((noinline, naked));
+//static void exitKernel(void)  __attribute((noinline, naked));
 void TIMER2_COMPA_vect(void) __attribute__ ((signal, naked));
 
 void queueInit(taskQueue_t * q)
@@ -284,8 +185,9 @@ void queueAddSortedByTicksUntilReady(taskQueue_t * q, Task_t * task)
 static Task_t  Tasks[MAXPROCESS + 1]; //extra space for idle
 static uint8_t NUM_TASKS_IN_USE = 0; 
 static Task_t* currentTask = NULL;
+volatile uint8_t* currentTaskStackPointer;
+volatile uint8_t* kernelStackPointer;
 static Task_t* const idleTask = &Tasks[MAXPROCESS];
-static volatile uint16_t kernelStackPointer;
 static volatile kernelRequest_t kernelRequest;
 static volatile uint8_t kernelNewTaskLevel = 0;
 //one for each RR, PERIODIC, and SYSTEM 
@@ -293,87 +195,6 @@ static volatile uint8_t kernelNewTaskLevel = 0;
 //having 4 of these allows nice indexing like readyQueue[RR], without needing -1 on every index
 //TODO may not need queue for system
 static taskQueue_t readyQueue[4]; 
-
-static void enterKernel(void) {
-	/*
-	 * The PC was pushed on the stack with the call to this function.
-	 * Now push on the I/O registers and the SREG as well.
-	 */
-	SAVE_CTX();
-
-	/*
-	 * The last piece of the context is the SP. Save it to a variable.
-	 */
-	currentTask->stackPointer = (uint8_t*) SP;
-
-	/*
-	 * Now restore the kernel's context, SP first.
-	 */
-	SP = kernelStackPointer;
-
-	/*
-	 * Now restore I/O and SREG registers.
-	 */
-	RESTORE_CTX();
-
-	/*
-	 * return explicitly required as we are "naked".
-	 *
-	 * The last piece of the context, the PC, is popped off the stack
-	 * with the ret instruction.
-	 */
-	asm volatile ("ret\n"::);
-}
-
-
-/**
- * @fn exitKernel
- *
- * @brief The actual context switching code begins here.
- *
- * This function is called by the kernel. Upon entry, we are using
- * the kernel stack, on top of which is the address of the instruction
- * after the call to exitKernel().
- *
- * Assumption: Our kernel is executed with interrupts already disabled.
- *
- * The "naked" attribute prevents the compiler from adding instructions
- * to save and restore register values. It also prevents an
- * automatic return instruction.
- */
-static void exitKernel(void) {
-	/*
-	 * The PC was pushed on the stack with the call to this function.
-	 * Now push on the I/O registers and the SREG as well.
-	 */
-	SAVE_CTX();
-
-	/*
-	 * The last piece of the context is the SP. Save it to a variable.
-	 */
-	kernelStackPointer = SP;
-
-	/*
-	 * Now restore the task's context, SP first.
-	 */
-	SP = (uint16_t) (currentTask->stackPointer);
-
-	/*
-	 * Now restore I/O and SREG registers.
-	 */
-	RESTORE_CTX();
-
-	/*
-	 * return explicitly required as we are "naked".
-	 * Interrupts are enabled or disabled according to SREG
-	 * recovered from stack, so we don't want to explicitly
-	 * enable them here.
-	 *
-	 * The last piece of the context, the PC, is popped off the stack
-	 * with the ret instruction.
-	 */
-	asm volatile ("ret\n"::);
-}
 
 void OS_Abort(void) {
 	uint8_t i, j;
@@ -444,32 +265,25 @@ static void Task_Create_Common(void (*f)(void), int arg, uint8_t level, Task_t *
 	 *   the stored SREG, and
 	 *   registers 30 to 0.
 	 */
-	uint8_t *stackBottom;
-	stackBottom       = &(task->stack[MAXSTACK - 1]);
-	uint8_t *stackTop = stackBottom - (32 + 1 + 2 + 2);
-	stackTop[2]       = (uint8_t) 0; //register r1 is 0
-	/* stackTop[31] is r30. */
-	stackTop[32]      = (uint8_t) _BV(SREG_I); /* set SREG_I bit in stored SREG. */
-	/* stackTop[33] is r31. */
+	uint8_t *sp;
+	sp       = (uint8_t *) &(task->stack[MAXSTACK - 1]);
+	//Clear the contents of the workspace
+	memset(&(task->stack),0,MAXSTACK);
 	
-	/* We are placing the address (16-bit) of the functions
-	 * onto the stack in reverse byte order (least significant first, followed
-	 * by most significant).  This is because the "return" assembly instructions
-	 * (ret and reti) pop addresses off in BIG ENDIAN (most sig. first, least sig.
-	 * second), even though the AT90 is LITTLE ENDIAN machine.
-	 */
-	stackTop[34] = (uint8_t) ((uint16_t) f >> 8);
-	stackTop[35] = (uint8_t) ((uint16_t)  f);
-	stackTop[36] = (uint8_t) ((uint16_t) Task_Terminate >> 8);
-	stackTop[37] = (uint8_t) (uint16_t)  Task_Terminate;
-	task->stackPointer = stackTop;
+	//Store terminate at the bottom of stack to protect against stack underrun.
+	*(unsigned char *)sp-- = ((unsigned int)Task_Terminate) & 0xff;
+	*(unsigned char *)sp-- = (((unsigned int)Task_Terminate) >> 8) & 0xff;
+
+	//Place return address of function at bottom of stack
+	*(unsigned char *)sp-- = ((unsigned int)f) & 0xff;
+	*(unsigned char *)sp-- = (((unsigned int)f) >> 8) & 0xff;
+	sp = sp - 33;
+	task->stackPointer = sp;
 }
 
 int   Task_Create_System(void (*f)(void), int arg)
 {
-	uint8_t sreg;
-	sreg = SREG;
-	cli();
+	Disable_Interrupt();
 	
 	if (NUM_TASKS_IN_USE >= MAXPROCESS + 1) return -1; //error to many procs
 	Task_t * task = queuePop(&readyQueue[0]);
@@ -477,17 +291,14 @@ int   Task_Create_System(void (*f)(void), int arg)
 	queuePush(&readyQueue[SYSTEM], task);
 	kernelNewTaskLevel = SYSTEM;
 	
-	enterKernel();
+	Enter_Kernel();
 	
-	SREG = sreg;
 	return 0;
 }
 
 int   Task_Create_RR(void (*f)(void), int arg)
 {
-	uint8_t sreg;
-	sreg = SREG;
-	cli();
+	Disable_Interrupt();
 	
 	if (NUM_TASKS_IN_USE >= MAXPROCESS + 1) return -1; //error to many procs
 	Task_t * task = queuePop(&readyQueue[0]);
@@ -495,17 +306,14 @@ int   Task_Create_RR(void (*f)(void), int arg)
 	queuePush(&readyQueue[RR], task);
 	kernelNewTaskLevel = RR;
 	
-	enterKernel();
-	
-	SREG = sreg;
+	Enter_Kernel();
+
 	return 0;
 }
 
 int   Task_Create_Period(void (*f)(void), int arg, unsigned int period, unsigned int wcet, unsigned int start)
 {
-	uint8_t sreg;
-	sreg = SREG;
-	cli();
+	Disable_Interrupt();
 	
 	if (NUM_TASKS_IN_USE >= MAXPROCESS + 1) return -1; //error to many procs
 	Task_t * task = queuePop(&readyQueue[0]);
@@ -515,36 +323,27 @@ int   Task_Create_Period(void (*f)(void), int arg, unsigned int period, unsigned
 	queueAddSortedByTicksUntilReady(&readyQueue[PERIODIC], task); 
 	kernelNewTaskLevel = PERIODIC;
 	
-	enterKernel();
+	Enter_Kernel();
 	
-	SREG = sreg;
 	return 0;
 }
 
 void  Task_Terminate(void) 
 {
-	uint8_t volatile sreg;
-	
-	sreg = SREG;
-	cli();
-	
-	//TODO probably need to context switch and reschedule
-	queuePush(&readyQueue[0], currentTask);
-	
-	SREG = sreg;
+	Disable_Interrupt();
+	kernelRequest = TASK_TERMINATE;
+	Enter_Kernel();
+	//if we return from enter kernel we're screwed
+	//and will exceute random code
+	OS_Abort();
 }
 
 void  Task_Next(void)
 {
-	uint8_t volatile sreg;
-	
-	sreg = SREG;
-	cli();
+	Disable_Interrupt();
 	
 	kernelRequest = TASK_NEXT;
-	enterKernel();
-	
-	SREG = sreg;
+	Enter_Kernel();
 }
 
 int   Task_GetArg(void)          
@@ -711,6 +510,7 @@ static void kernelSchedule(void)
 		{
 			currentTask = idleTask;
 		}
+		currentTaskStackPointer = currentTask->stackPointer;
 		currentTask->state = RUNNING;
 	}
 }
@@ -754,6 +554,10 @@ static void kernelUpdate(void)
 			}
 		}
 	break;
+	case TASK_TERMINATE:
+		currentTask->state = DEAD;
+		queuePush(&readyQueue[0], currentTask);
+	break;
 	case NONE:
 	break;
 	case KERNEL_REQUEST_COUNT:
@@ -768,7 +572,7 @@ static void kernelMainLoop(void)
 	for (;;) {
 		kernelUpdate();
 		kernelSchedule();
-		exitKernel();
+		Exit_Kernel();
 	}
 }
 
@@ -814,6 +618,7 @@ void OS_Init(void)
 	queuePush(&readyQueue[SYSTEM], task);
 	
 	currentTask = idleTask;
+	currentTaskStackPointer = currentTask->stackPointer;
 	currentTask->state = RUNNING;
 	kernelRequest = NONE;
 
@@ -822,7 +627,6 @@ void OS_Init(void)
 
 int main(void)
 {
-	SP = 0x4000;
 	OS_Init();
 	for(;;);
 	return 0;
@@ -843,61 +647,11 @@ int main(void)
  */
 void TIMER2_COMPA_vect(void)
 {
-	/*
-	 * Save the interrupted task's context on its stack,
-	 * and save the stack pointer.
-	 *
-	 * On the cur_task's stack, the registers and SREG are
-	 * saved in the right order, but we have to modify the stored value
-	 * of SREG. We know it should have interrupts enabled because this
-	 * ISR was able to execute, but it has interrupts disabled because
-	 * it was stored while this ISR was executing. So we set the bit (I = bit 7)
-	 * in the stored value.
-	 */
-	SAVE_CTX_TOP();
-
-	STACK_SREG_SET_I_BIT();
-
-	SAVE_CTX_BOTTOM();
-
-	currentTask->stackPointer = (uint8_t*) SP;
-
-	/*
-	 * Now that we already saved a copy of the stack pointer
-	 * for every context including the kernel, we can move to
-	 * the kernel stack and use it. We will restore it again later.
-	 */
-	SP = kernelStackPointer;
-
-	/*
-	 * Inform the kernel that this task was interrupted.
-	 */
-	//kernel_request = TIMER_EXPIRED;
-	 cur_ticks++;
-	/*
-	 * Prepare for next tick interrupt.
-	 */
+	cur_ticks++;
 	OCR2A += TICK_CYCLES;
-
 	kernelRequest = TIMER_EXPIRED;
 
-	/*
-	 * Restore the kernel context. (The stack pointer is restored again.)
-	 */
-	SP = kernelStackPointer;
-
-	/*
-	 * Now restore I/O and SREG registers.
-	 */
-	RESTORE_CTX();
-
-	/*
-	 * We use "ret" here, not "reti", because we do not want to
-	 * enable interrupts inside the kernel.
-	 * Explicitly required as we are "naked".
-	 *
-	 * The last piece of the context, the PC, is popped off the stack
-	 * with the ret instruction.
-	 */
+	Enter_Kernel();
+	
 	asm volatile ("ret\n"::);
 }

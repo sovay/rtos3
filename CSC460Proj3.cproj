@@ -137,6 +137,9 @@
     </ToolchainSettings>
   </PropertyGroup>
   <ItemGroup>
+    <Compile Include="cswitch.s">
+      <SubType>compile</SubType>
+    </Compile>
     <Compile Include="error_code.h">
       <SubType>compile</SubType>
     </Compile>
